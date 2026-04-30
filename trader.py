@@ -113,8 +113,9 @@ def main() -> int:
                 "q10_end":         float(q10[-1]),
                 "q90_end":         float(q90[-1]),
             }
-            log.info("%s: $%.2f → $%.2f (%.2f%%)",
-                     ticker, current_price, forecast_price, expected_return * 100)
+            log.info("%s: $%.2f → $%.2f (%.2f%%)  [day1=$%.2f q10=$%.2f q90=$%.2f n=%d]",
+                     ticker, current_price, forecast_price, expected_return * 100,
+                     float(point[0]), float(q10[-1]), float(q90[-1]), len(point))
         except Exception as e:
             log.error("Forecast failed for %s: %s", ticker, e)
             continue
