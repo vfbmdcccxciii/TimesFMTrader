@@ -6,3 +6,6 @@ yfinance>=0.2.40
 requests>=2.31
 huggingface_hub>=0.23
 safetensors>=0.5.3
+lxml>=4.9
+html5lib>=1.1
+beautifulsoup4>=4.12

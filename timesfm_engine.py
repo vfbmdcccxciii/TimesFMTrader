@@ -1,8 +1,8 @@
 """
 TimesFM 2.5 (200M PyTorch) wrapper.
 
-Loads once at construction. Forecasts a single univariate series and
-returns point forecast + 10th/90th percentile quantile bands.
+Loads once at construction. Supports both single-series and batched
+forecasting and returns point forecast + 10th/90th percentile quantile bands.
 """
 
 import logging
@@ -38,20 +38,29 @@ class TimesFMForecaster:
             )
         )
 
+    # ----- single series convenience -----
     def forecast(self, series: np.ndarray):
+        """series: 1D array oldest→newest. Returns (point[H], q10[H], q90[H])."""
+        results = self.forecast_batch([series])
+        return results[0]
+
+    # ----- batched (recommended for many candidates) -----
+    def forecast_batch(self, batch: list[np.ndarray]):
         """
-        series: 1D numpy array of close prices (oldest -> newest).
-        Returns (point[H], q10[H], q90[H]) for H = self.horizon.
-        Internally forecasts 128 steps and slices to self.horizon.
+        batch: list of 1D arrays, oldest → newest.
+        Returns list of (point[H], q10[H], q90[H]) tuples — one per input.
+        Inputs may have different lengths.
         """
-        series = np.asarray(series, dtype=np.float32)
+        clean = [np.asarray(s, dtype=np.float32) for s in batch]
         point_forecast, quantile_forecast = self.model.forecast(
             horizon=_OUTPUT_PATCH,
-            inputs=[series],
+            inputs=clean,
         )
-        # quantile_forecast shape: (B, 128, 10) -> mean + q10..q90
-        # index 1 = q10, index 9 = q90. Slice to self.horizon.
-        point = point_forecast[0, :self.horizon]              # (H,)
-        q10   = quantile_forecast[0, :self.horizon, 1]        # (H,)
-        q90   = quantile_forecast[0, :self.horizon, 9]        # (H,)
-        return point, q10, q90
+        out = []
+        H = self.horizon
+        for i in range(len(clean)):
+            point = point_forecast[i, :H]
+            q10   = quantile_forecast[i, :H, 1]   # index 1 = q10
+            q90   = quantile_forecast[i, :H, 9]   # index 9 = q90
+            out.append((point, q10, q90))
+        return out

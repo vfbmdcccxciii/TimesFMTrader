@@ -1,49 +1,48 @@
 """
-One-time setup: creates a Notion database per ticker and a single
-"Daily News" database, all as children of your chosen parent page.
-Prints out the JSON map(s) you'll paste into GitHub secrets.
+One-time setup for the universe-scan edition.
+
+Creates three databases as children of your parent page:
+
+  * Trade Log    — every BUY / SELL / HOLD event, filterable by Ticker
+  * Daily Scan   — top-N ranked candidates per day
+  * Daily News   — Finnhub headlines for held positions
+
+Then prints the IDs to paste into GitHub Secrets.
 
 Usage:
   export NOTION_TOKEN=secret_xxx
   export NOTION_PARENT_PAGE_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   python bootstrap_notion.py
-
-Re-running: this script is destructive in the sense that it creates new
-databases each time. Only run it on a fresh parent page, or trash the
-old ones first.
 """
 
 import os
-import json
 import requests
 
 NOTION_VERSION = "2022-06-28"
 
-CANDIDATES = [
-    ("AAPL",    "stock"),
-    ("MSFT",    "stock"),
-    ("NVDA",    "stock"),
-    ("GOOGL",   "stock"),
-    ("TSLA",    "stock"),
-    ("BTC-USD", "crypto"),
-    ("ETH-USD", "crypto"),
-    ("SOL-USD", "crypto"),
-]
 
-EMOJI = {"stock": "📈", "crypto": "🪙"}
+def _post_db(headers: dict, schema: dict) -> str:
+    r = requests.post(
+        "https://api.notion.com/v1/databases",
+        headers=headers, json=schema, timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["id"]
 
 
-# --------------------------------------------------------------------------
-# Per-ticker trade-log schema
-# --------------------------------------------------------------------------
-def trade_log_schema(ticker: str, asset_class: str) -> dict:
+def trade_log_schema() -> dict:
     return {
         "parent": {"type": "page_id", "page_id": os.environ["NOTION_PARENT_PAGE_ID"]},
-        "icon":   {"type": "emoji", "emoji": EMOJI[asset_class]},
-        "title": [{"type": "text", "text": {"content": f"{ticker} — Trade Log"}}],
+        "icon":   {"type": "emoji", "emoji": "📒"},
+        "title":  [{"type": "text", "text": {"content": "Trade Log"}}],
         "properties": {
             "Title":       {"title": {}},
             "Date":        {"date": {}},
+            "Ticker":      {"rich_text": {}},
+            "Asset Class": {"select": {"options": [
+                {"name": "stock",  "color": "blue"},
+                {"name": "crypto", "color": "orange"},
+            ]}},
             "Action":      {"select": {"options": [
                 {"name": "BUY",  "color": "green"},
                 {"name": "SELL", "color": "red"},
@@ -51,49 +50,65 @@ def trade_log_schema(ticker: str, asset_class: str) -> dict:
             ]}},
             "Price":       {"number": {"format": "dollar"}},
             "Quantity":    {"number": {"format": "number"}},
-            "Reason":      {"rich_text": {}},
             "Forecast 5d": {"number": {"format": "dollar"}},
             "Expected %":  {"number": {"format": "percent"}},
             "P&L":         {"number": {"format": "dollar"}},
             "Cash After":  {"number": {"format": "dollar"}},
-            "Asset Class": {"select": {"options": [
-                {"name": "stock",  "color": "blue"},
-                {"name": "crypto", "color": "orange"},
-            ]}},
+            "Reason":      {"rich_text": {}},
         },
     }
 
 
-# --------------------------------------------------------------------------
-# Daily news schema (one DB for everything)
-# --------------------------------------------------------------------------
+def scan_log_schema() -> dict:
+    return {
+        "parent": {"type": "page_id", "page_id": os.environ["NOTION_PARENT_PAGE_ID"]},
+        "icon":   {"type": "emoji", "emoji": "🔭"},
+        "title":  [{"type": "text", "text": {"content": "Daily Scan"}}],
+        "properties": {
+            "Title":   {"title": {}},
+            "Date":    {"date": {}},
+            "Rank":    {"number": {"format": "number"}},
+            "Ticker":  {"rich_text": {}},
+            "Asset Class": {"select": {"options": [
+                {"name": "stock",  "color": "blue"},
+                {"name": "crypto", "color": "orange"},
+            ]}},
+            "Status":  {"select": {"options": [
+                {"name": "BOUGHT",   "color": "green"},
+                {"name": "READY",    "color": "blue"},
+                {"name": "NO_CASH",  "color": "yellow"},
+                {"name": "NO_SLOTS", "color": "orange"},
+                {"name": "COOLDOWN", "color": "purple"},
+                {"name": "FILTERED", "color": "gray"},
+                {"name": "HELD",     "color": "default"},
+            ]}},
+            "Current Price": {"number": {"format": "dollar"}},
+            "Forecast 5d":   {"number": {"format": "dollar"}},
+            "Expected %":    {"number": {"format": "percent"}},
+            "Q10":     {"number": {"format": "dollar"}},
+            "Q90":     {"number": {"format": "dollar"}},
+            "Reason":  {"rich_text": {}},
+        },
+    }
+
+
 def news_schema() -> dict:
     return {
         "parent": {"type": "page_id", "page_id": os.environ["NOTION_PARENT_PAGE_ID"]},
         "icon":   {"type": "emoji", "emoji": "📰"},
-        "title": [{"type": "text", "text": {"content": "Daily News"}}],
+        "title":  [{"type": "text", "text": {"content": "Daily News"}}],
         "properties": {
             "Title":    {"title": {}},
             "Date":     {"date": {}},
-            "Ticker":   {"select": {"options": [
-                {"name": "AAPL",    "color": "blue"},
-                {"name": "MSFT",    "color": "blue"},
-                {"name": "NVDA",    "color": "blue"},
-                {"name": "GOOGL",   "color": "blue"},
-                {"name": "TSLA",    "color": "blue"},
-                {"name": "BTC-USD", "color": "orange"},
-                {"name": "ETH-USD", "color": "orange"},
-                {"name": "SOL-USD", "color": "orange"},
-                {"name": "ALL",     "color": "gray"},
-            ]}},
+            "Ticker":   {"rich_text": {}},
             "Category": {"select": {"options": [
                 {"name": "stock",   "color": "blue"},
                 {"name": "crypto",  "color": "orange"},
                 {"name": "general", "color": "gray"},
             ]}},
-            "Source":  {"rich_text": {}},
-            "URL":     {"url": {}},
-            "Summary": {"rich_text": {}},
+            "Source":   {"rich_text": {}},
+            "URL":      {"url": {}},
+            "Summary":  {"rich_text": {}},
         },
     }
 
@@ -106,36 +121,25 @@ def main():
         "Notion-Version": NOTION_VERSION,
     }
 
-    db_map = {}
-    for ticker, asset_class in CANDIDATES:
-        r = requests.post(
-            "https://api.notion.com/v1/databases",
-            headers=headers,
-            json=trade_log_schema(ticker, asset_class),
-            timeout=30,
-        )
-        r.raise_for_status()
-        db_id = r.json()["id"]
-        db_map[ticker] = db_id
-        print(f"  ✓ {ticker:8s} -> {db_id}")
+    print("Creating Trade Log ...")
+    trade_id = _post_db(headers, trade_log_schema())
+    print(f"  ✓ {trade_id}")
 
-    print("\nDaily News DB ...")
-    r = requests.post(
-        "https://api.notion.com/v1/databases",
-        headers=headers, json=news_schema(), timeout=30,
-    )
-    r.raise_for_status()
-    news_id = r.json()["id"]
-    print(f"  ✓ Daily News -> {news_id}")
+    print("Creating Daily Scan ...")
+    scan_id = _post_db(headers, scan_log_schema())
+    print(f"  ✓ {scan_id}")
+
+    print("Creating Daily News ...")
+    news_id = _post_db(headers, news_schema())
+    print(f"  ✓ {news_id}")
 
     print("\n--- Paste these into GitHub Secrets ---\n")
-    print("NOTION_DATABASE_MAP =")
-    print(json.dumps(db_map))
-    print("\nNOTION_NEWS_DATABASE_ID =")
-    print(news_id)
-    print("\nAlso (re)set:")
-    print("  NOTION_PARENT_PAGE_ID  = (your parent page id, same as you exported)")
-    print("  FINNHUB_API_KEY        = (free key from https://finnhub.io)")
+    print(f"NOTION_TRADE_LOG_ID     = {trade_id}")
+    print(f"NOTION_SCAN_LOG_ID      = {scan_id}")
+    print(f"NOTION_NEWS_DATABASE_ID = {news_id}")
+    print(f"NOTION_PARENT_PAGE_ID   = {os.environ['NOTION_PARENT_PAGE_ID']}")
+    print("FINNHUB_API_KEY         = (free key from https://finnhub.io)\n")
+    print("Note: NOTION_DATABASE_MAP from the previous edition is no longer used.")
 
 
 if __name__ == "__main__":
