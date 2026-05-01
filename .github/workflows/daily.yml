@@ -35,9 +35,12 @@ jobs:
 
       - name: Run trader
         env:
-          NOTION_TOKEN:        ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_MAP: ${{ secrets.NOTION_DATABASE_MAP }}
-          PYTHONUNBUFFERED:    "1"
+          NOTION_TOKEN:            ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_MAP:     ${{ secrets.NOTION_DATABASE_MAP }}
+          NOTION_NEWS_DATABASE_ID: ${{ secrets.NOTION_NEWS_DATABASE_ID }}
+          NOTION_PARENT_PAGE_ID:   ${{ secrets.NOTION_PARENT_PAGE_ID }}
+          FINNHUB_API_KEY:         ${{ secrets.FINNHUB_API_KEY }}
+          PYTHONUNBUFFERED:        "1"
         run: python trader.py
 
       - name: Commit updated portfolio state

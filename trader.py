@@ -5,9 +5,11 @@ Workflow:
   1. Load portfolio state (cash + holdings).
   2. Pull recent price history for each candidate asset.
   3. Run TimesFM forecast for each.
-  4. Apply trading rules → decide BUY / SELL / HOLD.
+  4. Apply trading rules → decide BUY / SELL / HOLD / SKIP.
   5. Execute paper trades, update state.
-  6. Log each decision to its Notion database.
+  6. Log a row for *every* candidate (with reason) to its Notion database.
+  7. Pull daily news for each ticker (Finnhub) and log to a single news DB.
+  8. Update the parent page's Daily Status callout (cash / value / P&L / positions).
 """
 
 import os
@@ -23,6 +25,7 @@ import pandas as pd
 from timesfm_engine import TimesFMForecaster
 from portfolio import Portfolio, TradingRules
 from notion_client import NotionLogger
+from news_client import NewsFetcher
 
 # --------------------------------------------------------------------------
 # Config
@@ -95,10 +98,13 @@ def main() -> int:
     notion = NotionLogger(
         token=os.environ["NOTION_TOKEN"],
         database_map=json.loads(os.environ["NOTION_DATABASE_MAP"]),
+        news_database_id=os.environ.get("NOTION_NEWS_DATABASE_ID"),
+        parent_page_id=os.environ.get("NOTION_PARENT_PAGE_ID"),
     )
 
     # --- decisions
     forecasts: dict[str, dict] = {}
+    fetch_errors: dict[str, str] = {}
     for ticker in CANDIDATES:
         try:
             history = fetch_history(ticker, CONTEXT_DAYS)
@@ -118,10 +124,12 @@ def main() -> int:
                      float(point[0]), float(q10[-1]), float(q90[-1]), len(point))
         except Exception as e:
             log.error("Forecast failed for %s: %s", ticker, e)
+            fetch_errors[ticker] = str(e)[:200]
             continue
 
     # 1) check exits first (stop-loss / take-profit / forecast reversal)
     sells = rules.evaluate_exits(portfolio, forecasts)
+    sold_tickers: set[str] = set()
     for ticker, reason in sells:
         price = forecasts[ticker]["current_price"]
         qty   = portfolio.holdings[ticker]["quantity"]
@@ -140,11 +148,13 @@ def main() -> int:
             pnl=pnl,
             cash_after=portfolio.cash,
         )
+        sold_tickers.add(ticker)
         log.info("SOLD %s × %.6f @ $%.2f (%s) | P&L: $%.2f",
                  ticker, qty, price, reason, pnl)
 
     # 2) then evaluate entries with whatever cash is available
-    buys = rules.evaluate_entries(portfolio, forecasts)
+    buys, skip_reasons = rules.evaluate_entries(portfolio, forecasts)
+    bought_tickers: set[str] = set()
     for ticker, allocation in buys:
         price = forecasts[ticker]["current_price"]
         qty = allocation / price
@@ -160,29 +170,89 @@ def main() -> int:
             pnl=0.0,
             cash_after=portfolio.cash,
         )
+        bought_tickers.add(ticker)
         log.info("BOUGHT %s × %.6f @ $%.2f (alloc $%.2f)",
                  ticker, qty, price, allocation)
 
-    # 3) HOLD entries — log status for everything we own and didn't trade
-    traded = {t for t, _ in sells} | {t for t, _ in buys}
-    for ticker in portfolio.holdings:
-        if ticker in traded or ticker not in forecasts:
+    # 3) Log a row for *every* candidate that was not bought / sold this run.
+    #    - HOLD for held positions (with hold_reason)
+    #    - SKIP-as-HOLD for un-held candidates (with skip reason)
+    #    - HOLD with "fetch_error" if the forecast itself failed
+    for ticker in CANDIDATES:
+        if ticker in sold_tickers or ticker in bought_tickers:
             continue
+
+        if ticker in fetch_errors:
+            notion.log_trade(
+                ticker=ticker,
+                asset_class=CANDIDATES[ticker],
+                action="HOLD",
+                price=0.0,
+                quantity=portfolio.holdings.get(ticker, {}).get("quantity", 0.0),
+                reason=f"fetch_error({fetch_errors[ticker]})",
+                forecast={"forecast_price": 0.0, "expected_return": 0.0,
+                          "q10_end": 0.0, "q90_end": 0.0,
+                          "current_price": 0.0},
+                pnl=0.0,
+                cash_after=portfolio.cash,
+            )
+            continue
+
+        f = forecasts[ticker]
+        if ticker in portfolio.holdings:
+            position = portfolio.holdings[ticker]
+            reason = rules.hold_reason(ticker, position, f)
+            qty = position["quantity"]
+            pnl = portfolio.unrealized_pnl(ticker, f["current_price"])
+        else:
+            reason = skip_reasons.get(ticker, "no_signal")
+            qty = 0.0
+            pnl = 0.0
+
         notion.log_trade(
             ticker=ticker,
             asset_class=CANDIDATES[ticker],
             action="HOLD",
-            price=forecasts[ticker]["current_price"],
-            quantity=portfolio.holdings[ticker]["quantity"],
-            reason="no_signal",
-            forecast=forecasts[ticker],
-            pnl=portfolio.unrealized_pnl(ticker, forecasts[ticker]["current_price"]),
+            price=f["current_price"],
+            quantity=qty,
+            reason=reason,
+            forecast=f,
+            pnl=pnl,
             cash_after=portfolio.cash,
         )
 
     # 4) update mark-to-market and save
     portfolio.mark_to_market({t: f["current_price"] for t, f in forecasts.items()})
     portfolio.save(STATE_FILE)
+
+    # 5) news — pull + log (best-effort; failure here doesn't fail the run)
+    try:
+        news_token = os.environ.get("FINNHUB_API_KEY")
+        if news_token and notion.news_database_id:
+            fetcher = NewsFetcher(api_key=news_token)
+            stock_tickers  = [t for t, c in CANDIDATES.items() if c == "stock"]
+            crypto_tickers = [t for t, c in CANDIDATES.items() if c == "crypto"]
+            items = fetcher.fetch_daily(stock_tickers, crypto_tickers, max_per_ticker=3)
+            log.info("Fetched %d news items", len(items))
+            for item in items:
+                notion.log_news(item)
+        else:
+            log.info("Skipping news fetch (FINNHUB_API_KEY or news DB id not set)")
+    except Exception as e:
+        log.error("News fetch/log failed: %s", e)
+
+    # 6) Status callout on the parent page
+    try:
+        if notion.parent_page_id:
+            notion.update_status_callout(
+                cash=portfolio.cash,
+                total_value=portfolio.last_total_value,
+                holdings=portfolio.holdings,
+                forecasts=forecasts,
+                initial_cash=INITIAL_CASH,
+            )
+    except Exception as e:
+        log.error("Status callout update failed: %s", e)
 
     log.info("=== Done. Total portfolio value: $%.2f ===", portfolio.last_total_value)
     return 0

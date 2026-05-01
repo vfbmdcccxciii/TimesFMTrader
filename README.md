@@ -69,9 +69,13 @@ export NOTION_PARENT_PAGE_ID=abcdef0123456789...
 python bootstrap_notion.py
 ```
 
-This creates 8 databases (one per ticker) with the right schema, then prints a JSON map. Copy that JSON.
+This creates 8 per-ticker databases plus a single "Daily News" database, then prints the JSON map and the news DB id.
 
-### 3. GitHub side
+### 3. (Optional but recommended) Free news API
+
+Get a free Finnhub key at <https://finnhub.io/dashboard>. The free tier gives 60 calls/min — well within budget.
+
+### 4. GitHub side
 
 In your repo: **Settings → Secrets and variables → Actions → New repository secret**, add:
 
@@ -79,10 +83,13 @@ In your repo: **Settings → Secrets and variables → Actions → New repositor
 |---|---|
 | `NOTION_TOKEN` | The integration token from step 1 |
 | `NOTION_DATABASE_MAP` | The JSON printed by `bootstrap_notion.py` |
+| `NOTION_NEWS_DATABASE_ID` | The news DB id printed by `bootstrap_notion.py` |
+| `NOTION_PARENT_PAGE_ID` | Same id you exported in step 2 (used to update the Daily Status callout) |
+| `FINNHUB_API_KEY` | Your Finnhub API key (optional — news is skipped if absent) |
 
 Push the repo. The workflow runs Mon–Fri at 21:30 UTC (≈30 min after US market close). You can also trigger it manually from the **Actions** tab.
 
-### 4. First run
+### 5. First run
 
 The first run will:
 - See no `state/portfolio.json` → initialize with $250 cash and no holdings.

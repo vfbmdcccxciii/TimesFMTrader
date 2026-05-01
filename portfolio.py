@@ -69,44 +69,86 @@ class TradingRules:
         return sells
 
     # ----- entry logic -----
-    def evaluate_entries(self, portfolio: "Portfolio", forecasts: dict) -> list[tuple[str, float]]:
+    # Returns (buys_list, skip_reasons_dict).
+    # buys_list: list of (ticker, allocation_dollars) actually bought.
+    # skip_reasons_dict: {ticker: human-readable reason} for every candidate
+    # that *could* have been bought but wasn't, so callers can log
+    # "why nothing happened" per ticker.
+    def evaluate_entries(
+        self, portfolio: "Portfolio", forecasts: dict
+    ) -> tuple[list[tuple[str, float]], dict[str, str]]:
+        skip_reasons: dict[str, str] = {}
+
         # rank candidates by expected return (only those passing thresholds)
         ranked = []
         for ticker, f in forecasts.items():
             if ticker in portfolio.holdings:
-                continue  # don't double up; one position per asset
+                # has a position → exit logic owns it; don't double up
+                continue
             if not portfolio.cooldown_passed(ticker, self.cooldown_hours):
+                skip_reasons[ticker] = (
+                    f"cooldown_active(<{self.cooldown_hours}h since last action)"
+                )
                 continue
             if f["expected_return"] < self.min_expected_return:
+                skip_reasons[ticker] = (
+                    f"below_min_return(forecast {f['expected_return']*100:.2f}% "
+                    f"< threshold {self.min_expected_return*100:.1f}%)"
+                )
                 continue
             if self.require_positive_q10 and f["q10_end"] <= f["current_price"]:
                 # 10th-percentile forecast still below entry → too uncertain
+                skip_reasons[ticker] = (
+                    f"uncertain_q10(q10 ${f['q10_end']:.2f} ≤ price ${f['current_price']:.2f})"
+                )
                 continue
             ranked.append((ticker, f["expected_return"]))
 
         ranked.sort(key=lambda x: x[1], reverse=True)
 
-        buys = []
+        buys: list[tuple[str, float]] = []
         slots_left = self.max_concurrent_positions - len(portfolio.holdings)
         total_value = portfolio.last_total_value or portfolio.cash
         max_alloc_per_position = total_value * self.max_position_pct
 
-        for ticker, _ in ranked:
+        for ticker, exp_ret in ranked:
             if slots_left <= 0:
-                break
-            # how much cash can we deploy?
+                skip_reasons[ticker] = (
+                    f"no_slots(max {self.max_concurrent_positions} concurrent positions)"
+                )
+                continue
             available = portfolio.cash - self.min_cash_floor
             if available < self.min_buy_dollars:
-                break
+                skip_reasons[ticker] = (
+                    f"no_cash(available ${available:.2f} < min ${self.min_buy_dollars:.2f})"
+                )
+                continue
             allocation = min(max_alloc_per_position, available)
             if allocation < self.min_buy_dollars:
+                skip_reasons[ticker] = (
+                    f"alloc_too_small(${allocation:.2f} < min ${self.min_buy_dollars:.2f})"
+                )
                 continue
             buys.append((ticker, allocation))
-            # decrement projection so we don't over-allocate within this batch
-            portfolio._projected_cash_used = getattr(portfolio, "_projected_cash_used", 0.0) + allocation
+            portfolio._projected_cash_used = getattr(
+                portfolio, "_projected_cash_used", 0.0
+            ) + allocation
             slots_left -= 1
 
-        return buys
+        return buys, skip_reasons
+
+    # ----- explainer for HOLD on owned positions -----
+    def hold_reason(self, ticker: str, position: dict, forecast: dict) -> str:
+        """Why we kept holding (didn't stop-loss / take-profit / reverse)."""
+        current = forecast["current_price"]
+        avg = position["avg_price"]
+        ret = (current - avg) / avg
+        exp_ret = forecast["expected_return"]
+        return (
+            f"hold(unrealized {ret*100:+.2f}%, "
+            f"forecast {exp_ret*100:+.2f}%, "
+            f"stop -{self.stop_loss_pct*100:.0f}% / tp +{self.take_profit_pct*100:.0f}%)"
+        )
 
 
 # --------------------------------------------------------------------------
